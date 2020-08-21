@@ -65,7 +65,9 @@ macro_rules! ecs{
             /// Entities with indices into components.
             pub entities: Vec<(usize, u8)>,
             /// Masks for enabled components per entity.
-            masks: Vec<u64>,
+            ///
+            /// Stores one mask for component state, one for initial state.
+            masks: Vec<(u64, u64)>,
         }
 
         impl World {
@@ -101,7 +103,7 @@ macro_rules! ecs{
             /// Returns `true` if entity has a component by index.
             #[inline(always)]
             pub fn has_component_index(&self, id: usize, ind: u8) -> bool {
-                (self.masks[id] >> ind) & 1 == 1
+                (self.masks[id].0 >> ind) & 1 == 1
             }
 
             /// Returns `true` if entity has a component.
@@ -115,7 +117,7 @@ macro_rules! ecs{
             /// Returns `true` if entity has a specified mask (a set of components).
             #[inline(always)]
             pub fn has_mask(&self, id: usize, mask: u64) -> bool {
-                self.masks[id] & mask == mask
+                self.masks[id].0 & mask == mask
             }
 
             /// Returns the component index of a component.
@@ -128,16 +130,26 @@ macro_rules! ecs{
 
             /// Returns the mask of an entity.
             #[inline(always)]
-            pub fn mask_of(&self, id: usize) -> u64 {self.masks[id]}
+            pub fn mask_of(&self, id: usize) -> u64 {self.masks[id].0}
+
+            /// Returns the initial mask of an entity.
+            #[inline(always)]
+            pub fn init_mask_of(&self, id: usize) -> u64 {self.masks[id].1}
 
             /// Enables component for entity.
             ///
-            /// This is unsafe because the entity must store the component in memory.
+            /// The entity must be pushed with the component active to enable it again.
+            /// Returns `true` if successful.
             #[inline(always)]
-            pub unsafe fn enable_component<T>(&mut self, id: usize)
+            pub fn enable_component<T>(&mut self, id: usize) -> bool
                 where Component: Ind<T>
             {
-                self.masks[id] |= 1 << <Component as Ind<T>>::ind();
+                if self.masks[id].1 >> <Component as Ind<T>>::ind() & 1 == 1 {
+                    self.masks[id].0 |= 1 << <Component as Ind<T>>::ind();
+                    true
+                } else {
+                    false
+                }
             }
 
             /// Disables component for entity.
@@ -145,13 +157,13 @@ macro_rules! ecs{
             pub fn disable_component<T>(&mut self, id: usize)
                 where Component: Ind<T>
             {
-                self.masks[id] &= !(1 << <Component as Ind<T>>::ind());
+                self.masks[id].0 &= !(1 << <Component as Ind<T>>::ind());
             }
 
             /// Disables all components for entity.
             #[inline(always)]
             pub fn disable(&mut self, id: usize) {
-                self.masks[id] = 0;
+                self.masks[id].0 = 0;
             }
         }
 
@@ -236,20 +248,52 @@ macro_rules! system(
             __bit += 1;
         }
         for __i in $iter {
-            if $world.has_mask(__i, __mask) {
-                $(
-                    let $filter_id = __i;
-                    if !$filter {continue};
-                )*
-                let slice = $world.entity_slice(__i).as_mut_ptr();
-                $(
-                    let $n: $x = unsafe{
-                        slice.offset(__mask_map[<Component as Ind<$x>>::ind() as usize])
-                        .get()
-                    }.unwrap();
-                )*
-                $e
-            }
+            entity_access!($world, __i, __mask, __mask_map,
+                $(filter: |$filter_id| $filter ;)* |$($n : $x,)*| $e);
+        }
+    };
+);
+
+/// Same as `system!`, but with entity ids.
+///
+/// Example: `system_ids!(world, filter: |n| ...; id, |&Position| {...});`
+#[macro_export]
+macro_rules! system_ids(
+    ($world:ident,
+     $(filter: |$filter_id:ident| $filter:expr ;)*
+     $id:ident,
+     |$($n:ident: $x:ty),*| $e:expr) => {
+        system_ids!($world,
+                    0..$world.entities.len(),
+                    $(filter: |$filter_id| $filter ;)*
+                    $id,
+                    |$($n: $x),*| $e)
+    };
+    ($world:ident, $iter:expr,
+     $(filter: |$filter_id:ident| $filter:expr ;)*
+     $id:ident,
+     |$($n:ident: $x:ty),*| $e:expr) => {
+        let __mask: u64 = ($(1 << <Component as Ind<$x>>::ind())|*);
+        let __component_len = __mask.count_ones() as isize;
+        assert_eq!(__component_len, tup_count!($($n),*), "Component used twice");
+        let mut __mask_map: [isize; 64] = [0; 64];
+        let mut __i: isize = 0;
+        let mut __bit = 0;
+        while __i < __component_len {
+            let mut set = false;
+            $(
+                if <Component as Ind<$x>>::ind() == __bit {
+                    __mask_map[<Component as Ind<$x>>::ind() as usize] = __i;
+                    set = true;
+                }
+            )*
+            if set {__i += 1}
+            __bit += 1;
+        }
+        for __i in $iter {
+            let $id = __i;
+            entity_access!($world, $id, __mask, __mask_map,
+                $(filter: |$filter_id| $filter ;)* |$($n : $x,)*| $e);
         }
     };
 );
@@ -316,13 +360,45 @@ macro_rules! entity(
             __bit += 1;
         }
         let __i = $ind;
-        if $world.has_mask(__i, __mask) {
-            let slice = $world.entity_slice(__i).as_mut_ptr();
+        entity_access!($world, __i, __mask, __mask_map, |$($n : $x,)*| $e);
+    }
+);
+
+/// Accesses an entity.
+///
+/// This macro is used internally.
+///
+/// Reuses mask map if the initial mask matches exactly.
+/// Otherwise, it loops through list of components in entity slice.
+#[macro_export]
+macro_rules! entity_access(
+    ($world:ident, $i:ident, $__mask:ident, $__mask_map:ident,
+     $(filter: |$filter_id:ident| $filter:expr ;)*
+    |$($n:ident : $x:ty,)*| $e:expr) => {
+        let __entity_init_mask = $world.init_mask_of($i);
+        let __entity_mask = $world.mask_of($i);
+        if __entity_init_mask & __entity_mask & $__mask == $__mask {
             $(
-                let $n: $x = unsafe{
-                    slice.offset(__mask_map[<Component as Ind<$x>>::ind() as usize])
-                    .get()
-                }.unwrap();
+                let $filter_id = $i;
+                if !$filter {continue};
+            )*
+            let __slice = $world.entity_slice($i).as_mut_ptr();
+            $(
+                let $n: $x = if __entity_init_mask == $__mask {
+                    unsafe {
+                        __slice.offset($__mask_map[<Component as Ind<$x>>::ind() as usize])
+                        .get()
+                    }.unwrap()
+                } else {
+                    let mut ptr = __slice;
+                    loop {
+                        if let Some(val) = unsafe {<*mut Component as Get<$x>>::get(ptr)} {
+                            break val;
+                        } else {
+                            unsafe {ptr = ptr.add(1)};
+                        }
+                    }
+                };
             )*
             $e
         }
@@ -390,7 +466,7 @@ macro_rules! push{
                 let id = self.entities.len();
                 let comp = self.components.len();
                 let mask = $(1 << <Component as Ind<$x>>::ind())|+;
-                self.masks.push(mask);
+                self.masks.push((mask, mask));
                 let count = tup_count!($($n),*);
                 assert_eq!(mask.count_ones(), count, "Component declared twice");
                 let mut i = 0;
