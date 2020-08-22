@@ -42,6 +42,128 @@
 //! - All entities have a slice refering to components
 //! - All entities have a mask that enable/disable components
 
+/// Stores masks efficiently and allows fast iteration.
+pub struct MaskStorage {
+    /// Stores `(active, initial)` masks.
+    pub masks: Vec<(u64, u64)>,
+    /// Stores the offsets of the mask.
+    pub offsets: Vec<usize>,
+}
+
+impl MaskStorage {
+    /// Creates a new mask storage.
+    pub fn new() -> MaskStorage {
+        MaskStorage {masks: vec![], offsets: vec![]}
+    }
+
+    /// Returns the active mask of entity id.
+    pub fn mask_of(&self, id: usize) -> u64 {
+        match self.offsets.binary_search(&id) {
+            Ok(ind) => self.masks[ind].0,
+            Err(ind) if ind > 0 => self.masks[ind - 1].0,
+            Err(_) => panic!("Mask storage offset not including `0`")
+        }
+    }
+
+    /// Returns the initial mask of entity id.
+    pub fn init_mask_of(&self, id: usize) -> u64 {
+        match self.offsets.binary_search(&id) {
+            Ok(ind) => self.masks[ind].1,
+            Err(ind) if ind > 0 => self.masks[ind - 1].1,
+            Err(_) => panic!("Mask storage offset not including `0`")
+        }
+    }
+
+    /// Returns both active and initial mask of entity id.
+    pub fn both_masks_of(&self, id: usize) -> (u64, u64) {
+        match self.offsets.binary_search(&id) {
+            Ok(ind) => self.masks[ind],
+            Err(ind) if ind > 0 => self.masks[ind - 1],
+            Err(_) => panic!("Mask storage offset not including `0`")
+        }
+    }
+
+    /// Pushes a new mask.
+    pub fn push(&mut self, mask: u64, id: usize) {
+        if let Some(&(active, last)) = self.masks.last() {
+            if mask == last && active == last {return};
+        }
+        self.masks.push((mask, mask));
+        self.offsets.push(id);
+    }
+
+    /// Updates a mask for an entity, returning `Err(swap_id)` to swap components.
+    pub fn update(&mut self, mask: u64, id: usize) -> Result<(), usize> {
+        let ind = match self.offsets.binary_search(&id) {
+            Ok(ind) => ind,
+            Err(ind) if ind > 0 => {ind - 1},
+            Err(_) => panic!("Mask storage offset not including `0`")
+        };
+        // No need to update the mask.
+        if self.masks[ind].0 == mask {return Ok(())};
+        let next_offset = self.offsets.get(ind + 1);
+        if let Some(&next) = next_offset {
+            if self.masks[ind + 1].0 == mask &&
+               self.masks[ind + 1].1 == self.masks[ind].1 {
+                // The next range matches the new mask.
+                if next - ind == 1 {
+                    // The entity is the only in old range.
+                    // Just remove it since moving components is not necessary.
+                    self.offsets[ind + 1] -= 1;
+                    self.offsets.remove(ind);
+                } else {
+                    // Swap entity slices.
+                    self.offsets[ind + 1] -= 1;
+                    return Err(next - 1);
+                }
+                return Ok(());
+            }
+        }
+        if ind > 0 {
+            if let Some(&prev) = self.offsets.get(ind - 1) {
+                if self.masks[ind - 1].0 == mask &&
+                   self.masks[ind - 1].1 == self.masks[ind].1 {
+                    // The previous range matches the new mask.
+                    if next_offset.is_none() ||
+                       *next_offset.unwrap() == ind + 1 {
+                        // The entity is the only in old range.
+                        // Just remove it since moving components is not necessary.
+                        self.offsets.remove(ind);
+                        self.offsets[ind - 1] += 1;
+                        return Ok(());
+                    } else {
+                        // Swap entity slices.
+                        self.offsets[ind] += 1;
+                        return Err(prev + 1);
+                    }
+                }
+            }
+        }
+        if let Some(&next) = next_offset {
+            // A new range must be inserted.
+            if next - ind == 1 {
+                // The entity is the only in old range.
+                // Just update the range.
+                self.masks[ind].0 = mask;
+            } else {
+                // Detect whether to insert before or after old range.
+                let j = if id == self.offsets[ind] {
+                    self.offsets[ind] += 1;
+                    ind
+                } else {ind + 1};
+                self.masks.insert(j, (mask, self.masks[ind].1));
+                self.offsets.insert(j, id);
+            }
+        } else {
+            // The entity is at the end.
+            // Add a new mask range.
+            self.masks.push((mask, self.masks[ind].1));
+            self.offsets.push(id);
+        }
+        Ok(())
+    }
+}
+
 /// Creates an Entity-Component-System.
 ///
 /// The first number is how many components are allowed per entity.
@@ -64,10 +186,8 @@ macro_rules! ecs{
             pub components: Vec<Component>,
             /// Entities with indices into components.
             pub entities: Vec<(usize, u8)>,
-            /// Masks for enabled components per entity.
-            ///
-            /// Stores one mask for component state, one for initial state.
-            masks: Vec<(u64, u64)>,
+            /// Masks for ranges of components.
+            pub masks: MaskStorage,
         }
 
         impl World {
@@ -76,7 +196,7 @@ macro_rules! ecs{
                 World {
                     components: vec![],
                     entities: vec![],
-                    masks: vec![],
+                    masks: MaskStorage::new(),
                 }
             }
 
@@ -85,7 +205,7 @@ macro_rules! ecs{
                 World {
                     components: Vec::with_capacity(components),
                     entities: Vec::with_capacity(entities),
-                    masks: Vec::with_capacity(entities),
+                    masks: MaskStorage::new(),
                 }
             }
 
@@ -103,7 +223,7 @@ macro_rules! ecs{
             /// Returns `true` if entity has a component by index.
             #[inline(always)]
             pub fn has_component_index(&self, id: usize, ind: u8) -> bool {
-                (self.masks[id].0 >> ind) & 1 == 1
+                (self.masks.mask_of(id) >> ind) & 1 == 1
             }
 
             /// Returns `true` if entity has a component.
@@ -117,7 +237,7 @@ macro_rules! ecs{
             /// Returns `true` if entity has a specified mask (a set of components).
             #[inline(always)]
             pub fn has_mask(&self, id: usize, mask: u64) -> bool {
-                self.masks[id].0 & mask == mask
+                self.masks.mask_of(id) & mask == mask
             }
 
             /// Returns the component index of a component.
@@ -130,22 +250,44 @@ macro_rules! ecs{
 
             /// Returns the mask of an entity.
             #[inline(always)]
-            pub fn mask_of(&self, id: usize) -> u64 {self.masks[id].0}
+            pub fn mask_of(&self, id: usize) -> u64 {self.masks.mask_of(id)}
 
             /// Returns the initial mask of an entity.
             #[inline(always)]
-            pub fn init_mask_of(&self, id: usize) -> u64 {self.masks[id].1}
+            pub fn init_mask_of(&self, id: usize) -> u64 {self.masks.init_mask_of(id)}
+
+            /// Swaps components of two entities.
+            ///
+            /// This is unsafe because the number of components
+            /// and their type are not checked.
+            pub unsafe fn unchecked_swap_components(&mut self, id: usize, j: usize) {
+                let id_slice = self.entity_slice(id);
+                let mut n = id_slice.len();
+                let mut id_ptr = id_slice.as_mut_ptr();
+                drop(id_slice);
+                let mut j_ptr = self.entity_slice(j).as_mut_ptr();
+                while n > 0 {
+                    std::mem::swap(&mut *id_ptr, &mut *j_ptr);
+                    id_ptr = id_ptr.add(1);
+                    j_ptr = j_ptr.add(1);
+                    n -= 1;
+                }
+                self.entities.swap(id, j);
+            }
 
             /// Enables component for entity.
             ///
             /// The entity must be pushed with the component active to enable it again.
             /// Returns `true` if successful.
-            #[inline(always)]
             pub fn enable_component<T>(&mut self, id: usize) -> bool
                 where Component: Ind<T>
             {
-                if self.masks[id].1 >> <Component as Ind<T>>::ind() & 1 == 1 {
-                    self.masks[id].0 |= 1 << <Component as Ind<T>>::ind();
+                let (mut mask, init_mask) = self.masks.both_masks_of(id);
+                if init_mask >> <Component as Ind<T>>::ind() & 1 == 1 {
+                    mask |= 1 << <Component as Ind<T>>::ind();
+                    if let Err(j) = self.masks.update(mask, id) {
+                        if j != id {unsafe {self.unchecked_swap_components(id, j)}}
+                    }
                     true
                 } else {
                     false
@@ -157,13 +299,19 @@ macro_rules! ecs{
             pub fn disable_component<T>(&mut self, id: usize)
                 where Component: Ind<T>
             {
-                self.masks[id].0 &= !(1 << <Component as Ind<T>>::ind());
+                let mut mask = self.masks.mask_of(id);
+                mask &= !(1 << <Component as Ind<T>>::ind());
+                if let Err(j) = self.masks.update(mask, id) {
+                    if j != id {unsafe {self.unchecked_swap_components(id, j)}}
+                }
             }
 
             /// Disables all components for entity.
             #[inline(always)]
             pub fn disable(&mut self, id: usize) {
-                self.masks[id].0 = 0;
+                if let Err(j) = self.masks.update(0, id) {
+                    if j != id {unsafe {self.unchecked_swap_components(id, j)}}
+                }
             }
         }
 
@@ -465,8 +613,8 @@ macro_rules! push{
             fn push(&mut self, ($($n),*): ($($x),*)) -> usize {
                 let id = self.entities.len();
                 let comp = self.components.len();
-                let mask = $(1 << <Component as Ind<$x>>::ind())|+;
-                self.masks.push((mask, mask));
+                let mask: u64 = $(1 << <Component as Ind<$x>>::ind())|+;
+                self.masks.push(mask, id);
                 let count = tup_count!($($n),*);
                 assert_eq!(mask.count_ones(), count, "Component declared twice");
                 let mut i = 0;
