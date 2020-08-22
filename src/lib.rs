@@ -56,18 +56,47 @@ impl MaskStorage {
         MaskStorage {masks: vec![], offsets: vec![]}
     }
 
+    /// Sorts optimally and returns a sort to update
+    /// entity slices and components.
+    pub fn optimize(&mut self, n: usize) -> Vec<usize> {
+        if n == 0 {return vec![]};
+
+        let mut ids: Vec<usize> = (0..n).collect();
+        let masks: Vec<(u64, u64)> = ids.iter().map(|&id| self.both_masks_of(id)).collect();
+        ids.sort_by(|a, b| {
+            let (am, ai) = masks[*a];
+            let (bm, bi) = masks[*b];
+            ai.cmp(&bi).then(bm.cmp(&am))
+        });
+
+        self.masks.clear();
+        self.offsets.clear();
+        let mut prev = masks[ids[0]];
+        self.masks.push(prev);
+        self.offsets.push(0);
+        for (i, &id) in ids.iter().enumerate().skip(1) {
+            if masks[id] != prev {
+                self.masks.push(masks[id]);
+                self.offsets.push(i);
+            }
+            prev = masks[id];
+        }
+
+        ids
+    }
+
     /// Gets the next range of entities with active mask pattern.
-    pub fn next(&self, mask_pat: u64, mut i: usize, n: usize) -> Option<(usize, usize)> {
+    pub fn next(&self, mask_pat: u64, i: &mut usize, n: usize) -> Option<(usize, usize)> {
         loop {
-            if i >= self.masks.len() {return None};
-            if self.masks[i].0 & mask_pat == mask_pat {
-                if let Some(&next) = self.offsets.get(i + 1) {
-                    return Some((self.offsets[i], next));
+            if *i >= self.masks.len() {return None};
+            if self.masks[*i].0 & mask_pat == mask_pat {
+                if let Some(&next) = self.offsets.get(*i + 1) {
+                    return Some((self.offsets[*i], next));
                 } else {
-                    return Some((self.offsets[i], n));
+                    return Some((self.offsets[*i], n));
                 }
             }
-            i += 1;
+            *i += 1;
         }
     }
 
@@ -222,6 +251,47 @@ macro_rules! ecs{
                     entities: Vec::with_capacity(entities),
                     masks: MaskStorage::new(),
                 }
+            }
+
+            /// Optimizes storage of components for cache friendliness.
+            ///
+            /// This does not preserve the entity ids.
+            ///
+            /// Returns a list of indices for new entities.
+            pub fn optimize(&mut self) -> Vec<usize> {
+                let n = self.entities.len();
+                let mut ids = self.masks.optimize(n);
+
+                let n = self.components.len();
+                let mut gen: Vec<usize> = vec![0; n];
+                let mut k = 0;
+                for (i, &id) in ids.iter().enumerate() {
+                    let off = self.entities[id].0;
+                    let m = self.entities[id].1 as usize;
+                    for j in 0..m {
+                        gen[off + j] = k;
+                        k += 1;
+                    }
+                }
+
+                for i in 0..n {
+                    while gen[i] != i {
+                        let j = gen[i];
+                        self.components.swap(i, j);
+                        gen.swap(i, j);
+                    }
+                }
+
+                let n = self.entities.len();
+                let mut k = 0;
+                let old = self.entities.clone();
+                for i in 0..n {
+                    let m = old[ids[i]].1;
+                    self.entities[i] = (k, m);
+                    k += m as usize;
+                }
+
+                ids
             }
 
             /// An iterator for all entities.
@@ -415,7 +485,7 @@ macro_rules! system(
 
         let __n = $world.entities.len();
         let mut __i = 0;
-        while let Some((__start, __end)) = $world.masks.next(__mask, __i, __n) {
+        while let Some((__start, __end)) = $world.masks.next(__mask, &mut __i, __n) {
             let __init_mask = $world.masks.masks[__i].1;
             for __i in __start..__end {
                 entity_unchecked_access!($world, __i, __mask, __mask_map, __init_mask,
@@ -439,7 +509,7 @@ macro_rules! system_ids(
 
         let __n = $world.entities.len();
         let mut __i = 0;
-        while let Some((__start, __end)) = $world.masks.next(__mask, __i, __n) {
+        while let Some((__start, __end)) = $world.masks.next(__mask, &mut __i, __n) {
             let __init_mask = $world.masks.masks[__i].1;
             for __i in __start..__end {
                 let $id = __i;
@@ -464,7 +534,7 @@ macro_rules! entity_ids(
 
         let __n = $world.entities.len();
         let mut __i = 0;
-        while let Some((__start, __end)) = $world.masks.next(__mask, __i, __n) {
+        while let Some((__start, __end)) = $world.masks.next(__mask, &mut __i, __n) {
             for __i in __start..__end {
                 let $id = __i;
                 $e
