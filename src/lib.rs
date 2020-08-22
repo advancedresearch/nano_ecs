@@ -56,9 +56,24 @@ impl MaskStorage {
         MaskStorage {masks: vec![], offsets: vec![]}
     }
 
-    /// Returns the active mask of entity id.
-    pub fn mask_of(&self, id: usize) -> u64 {
-        match self.offsets.binary_search(&id) {
+    /// Gets the next range of entities with active mask pattern.
+    pub fn next(&self, mask_pat: u64, mut i: usize, n: usize) -> Option<(usize, usize)> {
+        loop {
+            if i >= self.masks.len() {return None};
+            if self.masks[i].0 & mask_pat == mask_pat {
+                if let Some(&next) = self.offsets.get(i + 1) {
+                    return Some((self.offsets[i], next));
+                } else {
+                    return Some((self.offsets[i], n));
+                }
+            }
+            i += 1;
+        }
+    }
+
+    /// Returns the active mask of component id.
+    pub fn mask_of(&self, cid: usize) -> u64 {
+        match self.offsets.binary_search(&cid) {
             Ok(ind) => self.masks[ind].0,
             Err(ind) if ind > 0 => self.masks[ind - 1].0,
             Err(_) => panic!("Mask storage offset not including `0`")
@@ -354,15 +369,36 @@ macro_rules! mask_pat(
     ($($x:ident),*) => {($(1 << <Component as Ind<$x>>::ind())|*)}
 );
 
+/// Used internally by other macros.
+///
+/// Builds a mask map from the argument signature.
+#[macro_export]
+macro_rules! mask_pre(
+    ($mask:ident, $mask_map:ident, |$($n:ident: $x:ty),*|) => {
+        let $mask: u64 = ($(1 << <Component as Ind<$x>>::ind())|*);
+        let __component_len = $mask.count_ones() as isize;
+        assert_eq!(__component_len, tup_count!($($n),*), "Component used twice");
+
+        let mut $mask_map: [isize; 64] = [0; 64];
+        let mut __i: isize = 0;
+        let mut __bit = 0;
+        while __i < __component_len {
+            let mut set = false;
+            $(
+                if <Component as Ind<$x>>::ind() == __bit {
+                    $mask_map[<Component as Ind<$x>>::ind() as usize] = __i;
+                    set = true;
+                }
+            )*
+            if set {__i += 1}
+            __bit += 1;
+        }
+    }
+);
+
 /// Declares and executes a system.
 ///
 /// Example: `system!(world, |pos: &mut Position| {...});`
-///
-/// You can also specify the range of entities:
-///
-/// `system!(world, 0..4, |pos: &mut Position| {...});`
-///
-/// `system!(world, world.all(), |pos: &mut Position| {...});`
 ///
 /// One or more filters can be added using the `world` object:
 ///
@@ -375,29 +411,17 @@ macro_rules! mask_pat(
 #[macro_export]
 macro_rules! system(
     ($world:ident, $(filter: |$filter_id:ident| $filter:expr ;)* |$($n:ident: $x:ty),*| $e:expr) => {
-        system!($world, 0..$world.entities.len(), $(filter: |$filter_id| $filter ;)* |$($n: $x),*| $e)
-    };
-    ($world:ident, $iter:expr, $(filter: |$filter_id:ident| $filter:expr ;)* |$($n:ident: $x:ty),*| $e:expr) => {
-        let __mask: u64 = ($(1 << <Component as Ind<$x>>::ind())|*);
-        let __component_len = __mask.count_ones() as isize;
-        assert_eq!(__component_len, tup_count!($($n),*), "Component used twice");
-        let mut __mask_map: [isize; 64] = [0; 64];
-        let mut __i: isize = 0;
-        let mut __bit = 0;
-        while __i < __component_len {
-            let mut set = false;
-            $(
-                if <Component as Ind<$x>>::ind() == __bit {
-                    __mask_map[<Component as Ind<$x>>::ind() as usize] = __i;
-                    set = true;
-                }
-            )*
-            if set {__i += 1}
-            __bit += 1;
-        }
-        for __i in $iter {
-            entity_access!($world, __i, __mask, __mask_map,
-                $(filter: |$filter_id| $filter ;)* |$($n : $x,)*| $e);
+        mask_pre!(__mask, __mask_map, |$($n: $x),*|);
+
+        let __n = $world.entities.len();
+        let mut __i = 0;
+        while let Some((__start, __end)) = $world.masks.next(__mask, __i, __n) {
+            let __init_mask = $world.masks.masks[__i].1;
+            for __i in __start..__end {
+                entity_unchecked_access!($world, __i, __mask, __mask_map, __init_mask,
+                    $(filter: |$filter_id| $filter ;)* |$($n : $x,)*| $e);
+            }
+            __i += 1;
         }
     };
 );
@@ -411,37 +435,18 @@ macro_rules! system_ids(
      $(filter: |$filter_id:ident| $filter:expr ;)*
      $id:ident,
      |$($n:ident: $x:ty),*| $e:expr) => {
-        system_ids!($world,
-                    0..$world.entities.len(),
-                    $(filter: |$filter_id| $filter ;)*
-                    $id,
-                    |$($n: $x),*| $e)
-    };
-    ($world:ident, $iter:expr,
-     $(filter: |$filter_id:ident| $filter:expr ;)*
-     $id:ident,
-     |$($n:ident: $x:ty),*| $e:expr) => {
-        let __mask: u64 = ($(1 << <Component as Ind<$x>>::ind())|*);
-        let __component_len = __mask.count_ones() as isize;
-        assert_eq!(__component_len, tup_count!($($n),*), "Component used twice");
-        let mut __mask_map: [isize; 64] = [0; 64];
-        let mut __i: isize = 0;
-        let mut __bit = 0;
-        while __i < __component_len {
-            let mut set = false;
-            $(
-                if <Component as Ind<$x>>::ind() == __bit {
-                    __mask_map[<Component as Ind<$x>>::ind() as usize] = __i;
-                    set = true;
-                }
-            )*
-            if set {__i += 1}
-            __bit += 1;
-        }
-        for __i in $iter {
-            let $id = __i;
-            entity_access!($world, $id, __mask, __mask_map,
-                $(filter: |$filter_id| $filter ;)* |$($n : $x,)*| $e);
+        mask_pre!(__mask, __mask_map, |$($n: $x),*|);
+
+        let __n = $world.entities.len();
+        let mut __i = 0;
+        while let Some((__start, __end)) = $world.masks.next(__mask, __i, __n) {
+            let __init_mask = $world.masks.masks[__i].1;
+            for __i in __start..__end {
+                let $id = __i;
+                entity_unchecked_access!($world, $id, __mask, __mask_map, __init_mask,
+                    $(filter: |$filter_id| $filter ;)* |$($n : $x,)*| $e);
+            }
+            __i += 1;
         }
     };
 );
@@ -452,32 +457,20 @@ macro_rules! system_ids(
 /// This is the same for any signature, no matter which order arguments are preserved.
 #[macro_export]
 macro_rules! entity_ids(
-    ($world:ident, $iter:expr, $id:ident, |$($x:ty),*| $e:expr) => {
+    ($world:ident, $id:ident, |$($x:ty),*| $e:expr) => {
         let __mask: u64 = ($(1 << <Component as Ind<$x>>::ind())|*);
         let __component_len = __mask.count_ones() as isize;
-        let mut __mask_map: [isize; 64] = [0; 64];
-        let mut __i: isize = 0;
-        let mut __bit = 0;
-        while __i < __component_len {
-            let mut set = false;
-            $(
-                if <Component as Ind<$x>>::ind() == __bit {
-                    __mask_map[<Component as Ind<$x>>::ind() as usize] = __i;
-                    set = true;
-                }
-            )*
-            if set {__i += 1}
-            __bit += 1;
-        }
-        for __i in $iter {
-            if $world.has_mask(__i, __mask) {
+        assert_eq!(__component_len, tup_count!($($n),*), "Component used twice");
+
+        let __n = $world.entities.len();
+        let mut __i = 0;
+        while let Some((__start, __end)) = $world.masks.next(__mask, __i, __n) {
+            for __i in __start..__end {
                 let $id = __i;
                 $e
             }
+            __i += 1;
         }
-    };
-    ($world:ident, $id:ident, |$($x:ty),*| $e:expr) => {
-        entity_ids!($world, 0..$world.entities.len(), $id, |$($x),*| $e)
     };
 );
 
@@ -490,23 +483,8 @@ macro_rules! entity_ids(
 #[macro_export]
 macro_rules! entity(
     ($world:ident, $ind:expr, |$($n:ident: $x:ty),*| $e:expr) => {
-        let __mask: u64 = ($(1 << <Component as Ind<$x>>::ind())|*);
-        let __component_len = __mask.count_ones() as isize;
-        assert_eq!(__component_len, tup_count!($($n),*), "Component used twice");
-        let mut __mask_map: [isize; 64] = [0; 64];
-        let mut __i: isize = 0;
-        let mut __bit = 0;
-        while __i < __component_len {
-            let mut set = false;
-            $(
-                if <Component as Ind<$x>>::ind() == __bit {
-                    __mask_map[<Component as Ind<$x>>::ind() as usize] = __i;
-                    set = true;
-                }
-            )*
-            if set {__i += 1}
-            __bit += 1;
-        }
+        mask_pre!(__mask, __mask_map, |$($n: $x),*|);
+
         let __i = $ind;
         entity_access!($world, __i, __mask, __mask_map, |$($n : $x,)*| $e);
     }
@@ -550,6 +528,44 @@ macro_rules! entity_access(
             )*
             $e
         }
+    }
+);
+
+/// Accesses an entity, but without checking active mask.
+///
+/// This macro is used internally.
+///
+/// Reuses mask map if the initial mask matches exactly.
+/// Otherwise, it loops through list of components in entity slice.
+#[macro_export]
+macro_rules! entity_unchecked_access(
+    ($world:ident, $i:ident, $__mask:ident, $__mask_map:ident,
+     $__entity_init_mask:ident,
+     $(filter: |$filter_id:ident| $filter:expr ;)*
+    |$($n:ident : $x:ty,)*| $e:expr) => {
+        $(
+            let $filter_id = $i;
+            if !$filter {continue};
+        )*
+        let __slice = $world.entity_slice($i).as_mut_ptr();
+        $(
+            let $n: $x = if $__entity_init_mask == $__mask {
+                unsafe {
+                    __slice.offset($__mask_map[<Component as Ind<$x>>::ind() as usize])
+                    .get()
+                }.unwrap()
+            } else {
+                let mut ptr = __slice;
+                loop {
+                    if let Some(val) = unsafe {<*mut Component as Get<$x>>::get(ptr)} {
+                        break val;
+                    } else {
+                        unsafe {ptr = ptr.add(1)};
+                    }
+                }
+            };
+        )*
+        $e
     }
 );
 
