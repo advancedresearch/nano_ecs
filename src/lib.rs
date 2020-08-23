@@ -137,74 +137,64 @@ impl MaskStorage {
     }
 
     /// Updates a mask for an entity, returning `Err(swap_id)` to swap components.
-    pub fn update(&mut self, mask: u64, id: usize) -> Result<(), usize> {
+    pub fn update(&mut self, mask: u64, id: usize, n: usize) -> Result<(), usize> {
         let ind = match self.offsets.binary_search(&id) {
             Ok(ind) => ind,
             Err(ind) if ind > 0 => {ind - 1},
             Err(_) => panic!("Mask storage offset not including `0`")
         };
-        // No need to update the mask.
+
         if self.masks[ind].0 == mask {return Ok(())};
+
+        let offset = self.offsets[ind];
+        let init_mask = self.masks[ind].1;
         let next_offset = self.offsets.get(ind + 1);
-        if let Some(&next) = next_offset {
-            if self.masks[ind + 1].0 == mask &&
-               self.masks[ind + 1].1 == self.masks[ind].1 {
-                // The next range matches the new mask.
-                if next - ind == 1 {
-                    // The entity is the only in old range.
-                    // Just remove it since moving components is not necessary.
-                    self.offsets[ind + 1] -= 1;
-                    self.offsets.remove(ind);
-                } else {
-                    // Swap entity slices.
-                    self.offsets[ind + 1] -= 1;
-                    return Err(next - 1);
-                }
-                return Ok(());
+        let prev_offset = if ind == 0 {None} else {self.offsets.get(ind - 1)};
+        let next_range_same_masks = next_offset.is_some() &&
+            self.masks[ind + 1] == (mask, init_mask);
+        let prev_range_same_masks = prev_offset.is_some() &&
+            self.masks[ind - 1] == (mask, init_mask);
+
+        let next_offset = next_offset.map(|x| *x).unwrap_or(n);
+        let at_beginning_in_old_range = offset == id;
+        let at_end_in_old_range = next_offset == id + 1;
+
+        let only_in_old_range = at_beginning_in_old_range && at_end_in_old_range;
+        let mut remove_old_range = false;
+        let mut res = Ok(());
+        match (prev_range_same_masks, next_range_same_masks, only_in_old_range) {
+            (true, false, _) => {
+                // Join previous range.
+                remove_old_range = only_in_old_range;
+                if !at_beginning_in_old_range {res = Err(offset)};
             }
-        }
-        if ind > 0 {
-            if let Some(&prev) = self.offsets.get(ind - 1) {
-                if self.masks[ind - 1].0 == mask &&
-                   self.masks[ind - 1].1 == self.masks[ind].1 {
-                    // The previous range matches the new mask.
-                    if next_offset.is_none() ||
-                       *next_offset.unwrap() == ind + 1 {
-                        // The entity is the only in old range.
-                        // Just remove it since moving components is not necessary.
-                        self.offsets.remove(ind);
-                        self.offsets[ind - 1] += 1;
-                        return Ok(());
-                    } else {
-                        // Swap entity slices.
-                        self.offsets[ind] += 1;
-                        return Err(prev + 1);
-                    }
-                }
+            (false, true, _) | (_, true, false) => {
+                // Join next range.
+                remove_old_range = only_in_old_range;
+                if !at_end_in_old_range {res = Err(next_offset - 1)}
             }
-        }
-        if let Some(&next) = next_offset {
-            // A new range must be inserted.
-            if next - ind == 1 {
-                // The entity is the only in old range.
-                // Just update the range.
+            (true, true, true) => {
+                // Join previous and next range.
+                remove_old_range = only_in_old_range;
+            }
+            (false, false, true) => {
+                // Change mask on old range.
                 self.masks[ind].0 = mask;
-            } else {
-                // Detect whether to insert before or after old range.
-                let j = if id == self.offsets[ind] {
-                    self.offsets[ind] += 1;
-                    ind
-                } else {ind + 1};
-                self.masks.insert(j, (mask, self.masks[ind].1));
-                self.offsets.insert(j, id);
             }
-        } else {
-            // The entity is at the end.
-            // Add a new mask range.
-            self.masks.push((mask, self.masks[ind].1));
-            self.offsets.push(id);
+            (false, false, false) => {
+                // Insert range.
+                self.offsets.insert(ind + 1, id + 1);
+                let old_masks = self.masks[ind];
+                self.masks.insert(ind + 1, old_masks);
+                self.offsets.insert(ind + 1, id);
+                self.masks.insert(ind + 1, (mask, init_mask));
+            }
         }
-        Ok(())
+        if remove_old_range {
+            self.offsets.remove(ind);
+            self.masks.remove(ind);
+        }
+        res
     }
 }
 
@@ -370,7 +360,7 @@ macro_rules! ecs{
                 let (mut mask, init_mask) = self.masks.both_masks_of(id);
                 if init_mask >> <Component as Ind<T>>::ind() & 1 == 1 {
                     mask |= 1 << <Component as Ind<T>>::ind();
-                    if let Err(j) = self.masks.update(mask, id) {
+                    if let Err(j) = self.masks.update(mask, id, self.entities.len()) {
                         if j != id {unsafe {self.unchecked_swap_components(id, j)}}
                     }
                     true
@@ -386,7 +376,7 @@ macro_rules! ecs{
             {
                 let mut mask = self.masks.mask_of(id);
                 mask &= !(1 << <Component as Ind<T>>::ind());
-                if let Err(j) = self.masks.update(mask, id) {
+                if let Err(j) = self.masks.update(mask, id, self.entities.len()) {
                     if j != id {unsafe {self.unchecked_swap_components(id, j)}}
                 }
             }
@@ -394,7 +384,7 @@ macro_rules! ecs{
             /// Disables all components for entity.
             #[inline(always)]
             pub fn disable(&mut self, id: usize) {
-                if let Err(j) = self.masks.update(0, id) {
+                if let Err(j) = self.masks.update(0, id, self.entities.len()) {
                     if j != id {unsafe {self.unchecked_swap_components(id, j)}}
                 }
             }
