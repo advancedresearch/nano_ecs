@@ -42,6 +42,162 @@
 //! - All entities have a slice refering to components
 //! - All entities have a mask that enable/disable components
 
+/// Stores masks efficiently and allows fast iteration.
+pub struct MaskStorage {
+    /// Stores `(active, initial)` masks.
+    pub masks: Vec<(u64, u64)>,
+    /// Stores the offsets of the mask.
+    pub offsets: Vec<usize>,
+}
+
+impl MaskStorage {
+    /// Creates a new mask storage.
+    pub fn new() -> MaskStorage {
+        MaskStorage {masks: vec![], offsets: vec![]}
+    }
+
+    /// Sorts optimally and returns a sort to update
+    /// entity slices and components.
+    pub fn optimize(&mut self, n: usize) -> Vec<usize> {
+        if n == 0 {return vec![]};
+
+        let mut ids: Vec<usize> = (0..n).collect();
+        let masks: Vec<(u64, u64)> = ids.iter().map(|&id| self.both_masks_of(id)).collect();
+        ids.sort_by(|a, b| {
+            let (am, ai) = masks[*a];
+            let (bm, bi) = masks[*b];
+            ai.cmp(&bi).then(bm.cmp(&am))
+        });
+
+        self.masks.clear();
+        self.offsets.clear();
+        let mut prev = masks[ids[0]];
+        self.masks.push(prev);
+        self.offsets.push(0);
+        for (i, &id) in ids.iter().enumerate().skip(1) {
+            if masks[id] != prev {
+                self.masks.push(masks[id]);
+                self.offsets.push(i);
+            }
+            prev = masks[id];
+        }
+
+        ids
+    }
+
+    /// Gets the next range of entities with active mask pattern.
+    pub fn next(&self, mask_pat: u64, i: &mut usize, n: usize) -> Option<(usize, usize)> {
+        loop {
+            if *i >= self.masks.len() {return None};
+            if self.masks[*i].0 & mask_pat == mask_pat {
+                if let Some(&next) = self.offsets.get(*i + 1) {
+                    return Some((self.offsets[*i], next));
+                } else {
+                    return Some((self.offsets[*i], n));
+                }
+            }
+            *i += 1;
+        }
+    }
+
+    /// Returns the active mask of component id.
+    pub fn mask_of(&self, cid: usize) -> u64 {
+        match self.offsets.binary_search(&cid) {
+            Ok(ind) => self.masks[ind].0,
+            Err(ind) if ind > 0 => self.masks[ind - 1].0,
+            Err(_) => panic!("Mask storage offset not including `0`")
+        }
+    }
+
+    /// Returns the initial mask of entity id.
+    pub fn init_mask_of(&self, id: usize) -> u64 {
+        match self.offsets.binary_search(&id) {
+            Ok(ind) => self.masks[ind].1,
+            Err(ind) if ind > 0 => self.masks[ind - 1].1,
+            Err(_) => panic!("Mask storage offset not including `0`")
+        }
+    }
+
+    /// Returns both active and initial mask of entity id.
+    pub fn both_masks_of(&self, id: usize) -> (u64, u64) {
+        match self.offsets.binary_search(&id) {
+            Ok(ind) => self.masks[ind],
+            Err(ind) if ind > 0 => self.masks[ind - 1],
+            Err(_) => panic!("Mask storage offset not including `0`")
+        }
+    }
+
+    /// Pushes a new mask.
+    pub fn push(&mut self, mask: u64, id: usize) {
+        if let Some(&(active, last)) = self.masks.last() {
+            if mask == last && active == last {return};
+        }
+        self.masks.push((mask, mask));
+        self.offsets.push(id);
+    }
+
+    /// Updates a mask for an entity, returning `Err(swap_id)` to swap components.
+    pub fn update(&mut self, mask: u64, id: usize, n: usize) -> Result<(), usize> {
+        let ind = match self.offsets.binary_search(&id) {
+            Ok(ind) => ind,
+            Err(ind) if ind > 0 => {ind - 1},
+            Err(_) => panic!("Mask storage offset not including `0`")
+        };
+
+        if self.masks[ind].0 == mask {return Ok(())};
+
+        let offset = self.offsets[ind];
+        let init_mask = self.masks[ind].1;
+        let next_offset = self.offsets.get(ind + 1);
+        let prev_offset = if ind == 0 {None} else {self.offsets.get(ind - 1)};
+        let next_range_same_masks = next_offset.is_some() &&
+            self.masks[ind + 1] == (mask, init_mask);
+        let prev_range_same_masks = prev_offset.is_some() &&
+            self.masks[ind - 1] == (mask, init_mask);
+
+        let next_offset = next_offset.map(|x| *x).unwrap_or(n);
+        let at_beginning_in_old_range = offset == id;
+        let at_end_in_old_range = next_offset == id + 1;
+
+        let only_in_old_range = at_beginning_in_old_range && at_end_in_old_range;
+        let mut remove_old_range = false;
+        let mut res = Ok(());
+        match (prev_range_same_masks, next_range_same_masks, only_in_old_range) {
+            (true, false, _) => {
+                // Join previous range.
+                remove_old_range = only_in_old_range;
+                if !at_beginning_in_old_range {res = Err(offset)};
+            }
+            (false, true, _) | (_, true, false) => {
+                // Join next range.
+                remove_old_range = only_in_old_range;
+                if !at_end_in_old_range {res = Err(next_offset - 1)}
+            }
+            (true, true, true) => {
+                // Join previous and next range.
+                remove_old_range = only_in_old_range;
+            }
+            (false, false, true) => {
+                // Change mask on old range.
+                self.masks[ind].0 = mask;
+            }
+            (false, false, false) => {
+                // Insert range.
+                self.offsets.insert(ind + 1, id + 1);
+                let old_masks = self.masks[ind];
+                self.masks.insert(ind + 1, old_masks);
+                self.offsets.insert(ind + 1, id);
+                self.masks.insert(ind + 1, (mask, init_mask));
+            }
+        }
+        if remove_old_range {
+            self.offsets.remove(ind);
+            self.masks.remove(ind);
+        }
+        res
+    }
+}
+
 /// Creates an Entity-Component-System.
 ///
 /// The first number is how many components are allowed per entity.
@@ -64,10 +220,8 @@ macro_rules! ecs{
             pub components: Vec<Component>,
             /// Entities with indices into components.
             pub entities: Vec<(usize, u8)>,
-            /// Masks for enabled components per entity.
-            ///
-            /// Stores one mask for component state, one for initial state.
-            masks: Vec<(u64, u64)>,
+            /// Masks for ranges of components.
+            pub masks: MaskStorage,
         }
 
         impl World {
@@ -76,7 +230,7 @@ macro_rules! ecs{
                 World {
                     components: vec![],
                     entities: vec![],
-                    masks: vec![],
+                    masks: MaskStorage::new(),
                 }
             }
 
@@ -85,8 +239,49 @@ macro_rules! ecs{
                 World {
                     components: Vec::with_capacity(components),
                     entities: Vec::with_capacity(entities),
-                    masks: Vec::with_capacity(entities),
+                    masks: MaskStorage::new(),
                 }
+            }
+
+            /// Optimizes storage of components for cache friendliness.
+            ///
+            /// This does not preserve the entity ids.
+            ///
+            /// Returns a list of indices for new entities.
+            pub fn optimize(&mut self) -> Vec<usize> {
+                let n = self.entities.len();
+                let mut ids = self.masks.optimize(n);
+
+                let n = self.components.len();
+                let mut gen: Vec<usize> = vec![0; n];
+                let mut k = 0;
+                for (i, &id) in ids.iter().enumerate() {
+                    let off = self.entities[id].0;
+                    let m = self.entities[id].1 as usize;
+                    for j in 0..m {
+                        gen[off + j] = k;
+                        k += 1;
+                    }
+                }
+
+                for i in 0..n {
+                    while gen[i] != i {
+                        let j = gen[i];
+                        self.components.swap(i, j);
+                        gen.swap(i, j);
+                    }
+                }
+
+                let n = self.entities.len();
+                let mut k = 0;
+                let old = self.entities.clone();
+                for i in 0..n {
+                    let m = old[ids[i]].1;
+                    self.entities[i] = (k, m);
+                    k += m as usize;
+                }
+
+                ids
             }
 
             /// An iterator for all entities.
@@ -103,7 +298,7 @@ macro_rules! ecs{
             /// Returns `true` if entity has a component by index.
             #[inline(always)]
             pub fn has_component_index(&self, id: usize, ind: u8) -> bool {
-                (self.masks[id].0 >> ind) & 1 == 1
+                (self.masks.mask_of(id) >> ind) & 1 == 1
             }
 
             /// Returns `true` if entity has a component.
@@ -117,7 +312,7 @@ macro_rules! ecs{
             /// Returns `true` if entity has a specified mask (a set of components).
             #[inline(always)]
             pub fn has_mask(&self, id: usize, mask: u64) -> bool {
-                self.masks[id].0 & mask == mask
+                self.masks.mask_of(id) & mask == mask
             }
 
             /// Returns the component index of a component.
@@ -130,22 +325,44 @@ macro_rules! ecs{
 
             /// Returns the mask of an entity.
             #[inline(always)]
-            pub fn mask_of(&self, id: usize) -> u64 {self.masks[id].0}
+            pub fn mask_of(&self, id: usize) -> u64 {self.masks.mask_of(id)}
 
             /// Returns the initial mask of an entity.
             #[inline(always)]
-            pub fn init_mask_of(&self, id: usize) -> u64 {self.masks[id].1}
+            pub fn init_mask_of(&self, id: usize) -> u64 {self.masks.init_mask_of(id)}
+
+            /// Swaps components of two entities.
+            ///
+            /// This is unsafe because the number of components
+            /// and their type are not checked.
+            pub unsafe fn unchecked_swap_components(&mut self, id: usize, j: usize) {
+                let id_slice = self.entity_slice(id);
+                let mut n = id_slice.len();
+                let mut id_ptr = id_slice.as_mut_ptr();
+                drop(id_slice);
+                let mut j_ptr = self.entity_slice(j).as_mut_ptr();
+                while n > 0 {
+                    std::mem::swap(&mut *id_ptr, &mut *j_ptr);
+                    id_ptr = id_ptr.add(1);
+                    j_ptr = j_ptr.add(1);
+                    n -= 1;
+                }
+                self.entities.swap(id, j);
+            }
 
             /// Enables component for entity.
             ///
             /// The entity must be pushed with the component active to enable it again.
             /// Returns `true` if successful.
-            #[inline(always)]
             pub fn enable_component<T>(&mut self, id: usize) -> bool
                 where Component: Ind<T>
             {
-                if self.masks[id].1 >> <Component as Ind<T>>::ind() & 1 == 1 {
-                    self.masks[id].0 |= 1 << <Component as Ind<T>>::ind();
+                let (mut mask, init_mask) = self.masks.both_masks_of(id);
+                if init_mask >> <Component as Ind<T>>::ind() & 1 == 1 {
+                    mask |= 1 << <Component as Ind<T>>::ind();
+                    if let Err(j) = self.masks.update(mask, id, self.entities.len()) {
+                        if j != id {unsafe {self.unchecked_swap_components(id, j)}}
+                    }
                     true
                 } else {
                     false
@@ -157,13 +374,19 @@ macro_rules! ecs{
             pub fn disable_component<T>(&mut self, id: usize)
                 where Component: Ind<T>
             {
-                self.masks[id].0 &= !(1 << <Component as Ind<T>>::ind());
+                let mut mask = self.masks.mask_of(id);
+                mask &= !(1 << <Component as Ind<T>>::ind());
+                if let Err(j) = self.masks.update(mask, id, self.entities.len()) {
+                    if j != id {unsafe {self.unchecked_swap_components(id, j)}}
+                }
             }
 
             /// Disables all components for entity.
             #[inline(always)]
             pub fn disable(&mut self, id: usize) {
-                self.masks[id].0 = 0;
+                if let Err(j) = self.masks.update(0, id, self.entities.len()) {
+                    if j != id {unsafe {self.unchecked_swap_components(id, j)}}
+                }
             }
         }
 
@@ -206,15 +429,36 @@ macro_rules! mask_pat(
     ($($x:ident),*) => {($(1 << <Component as Ind<$x>>::ind())|*)}
 );
 
+/// Used internally by other macros.
+///
+/// Builds a mask map from the argument signature.
+#[macro_export]
+macro_rules! mask_pre(
+    ($mask:ident, $mask_map:ident, |$($n:ident: $x:ty),*|) => {
+        let $mask: u64 = ($(1 << <Component as Ind<$x>>::ind())|*);
+        let __component_len = $mask.count_ones() as isize;
+        assert_eq!(__component_len, tup_count!($($n),*), "Component used twice");
+
+        let mut $mask_map: [isize; 64] = [0; 64];
+        let mut __i: isize = 0;
+        let mut __bit = 0;
+        while __i < __component_len {
+            let mut set = false;
+            $(
+                if <Component as Ind<$x>>::ind() == __bit {
+                    $mask_map[<Component as Ind<$x>>::ind() as usize] = __i;
+                    set = true;
+                }
+            )*
+            if set {__i += 1}
+            __bit += 1;
+        }
+    }
+);
+
 /// Declares and executes a system.
 ///
 /// Example: `system!(world, |pos: &mut Position| {...});`
-///
-/// You can also specify the range of entities:
-///
-/// `system!(world, 0..4, |pos: &mut Position| {...});`
-///
-/// `system!(world, world.all(), |pos: &mut Position| {...});`
 ///
 /// One or more filters can be added using the `world` object:
 ///
@@ -227,29 +471,17 @@ macro_rules! mask_pat(
 #[macro_export]
 macro_rules! system(
     ($world:ident, $(filter: |$filter_id:ident| $filter:expr ;)* |$($n:ident: $x:ty),*| $e:expr) => {
-        system!($world, 0..$world.entities.len(), $(filter: |$filter_id| $filter ;)* |$($n: $x),*| $e)
-    };
-    ($world:ident, $iter:expr, $(filter: |$filter_id:ident| $filter:expr ;)* |$($n:ident: $x:ty),*| $e:expr) => {
-        let __mask: u64 = ($(1 << <Component as Ind<$x>>::ind())|*);
-        let __component_len = __mask.count_ones() as isize;
-        assert_eq!(__component_len, tup_count!($($n),*), "Component used twice");
-        let mut __mask_map: [isize; 64] = [0; 64];
-        let mut __i: isize = 0;
-        let mut __bit = 0;
-        while __i < __component_len {
-            let mut set = false;
-            $(
-                if <Component as Ind<$x>>::ind() == __bit {
-                    __mask_map[<Component as Ind<$x>>::ind() as usize] = __i;
-                    set = true;
-                }
-            )*
-            if set {__i += 1}
-            __bit += 1;
-        }
-        for __i in $iter {
-            entity_access!($world, __i, __mask, __mask_map,
-                $(filter: |$filter_id| $filter ;)* |$($n : $x,)*| $e);
+        mask_pre!(__mask, __mask_map, |$($n: $x),*|);
+
+        let __n = $world.entities.len();
+        let mut __i = 0;
+        while let Some((__start, __end)) = $world.masks.next(__mask, &mut __i, __n) {
+            let __init_mask = $world.masks.masks[__i].1;
+            for __i in __start..__end {
+                entity_unchecked_access!($world, __i, __mask, __mask_map, __init_mask,
+                    $(filter: |$filter_id| $filter ;)* |$($n : $x,)*| $e);
+            }
+            __i += 1;
         }
     };
 );
@@ -263,37 +495,18 @@ macro_rules! system_ids(
      $(filter: |$filter_id:ident| $filter:expr ;)*
      $id:ident,
      |$($n:ident: $x:ty),*| $e:expr) => {
-        system_ids!($world,
-                    0..$world.entities.len(),
-                    $(filter: |$filter_id| $filter ;)*
-                    $id,
-                    |$($n: $x),*| $e)
-    };
-    ($world:ident, $iter:expr,
-     $(filter: |$filter_id:ident| $filter:expr ;)*
-     $id:ident,
-     |$($n:ident: $x:ty),*| $e:expr) => {
-        let __mask: u64 = ($(1 << <Component as Ind<$x>>::ind())|*);
-        let __component_len = __mask.count_ones() as isize;
-        assert_eq!(__component_len, tup_count!($($n),*), "Component used twice");
-        let mut __mask_map: [isize; 64] = [0; 64];
-        let mut __i: isize = 0;
-        let mut __bit = 0;
-        while __i < __component_len {
-            let mut set = false;
-            $(
-                if <Component as Ind<$x>>::ind() == __bit {
-                    __mask_map[<Component as Ind<$x>>::ind() as usize] = __i;
-                    set = true;
-                }
-            )*
-            if set {__i += 1}
-            __bit += 1;
-        }
-        for __i in $iter {
-            let $id = __i;
-            entity_access!($world, $id, __mask, __mask_map,
-                $(filter: |$filter_id| $filter ;)* |$($n : $x,)*| $e);
+        mask_pre!(__mask, __mask_map, |$($n: $x),*|);
+
+        let __n = $world.entities.len();
+        let mut __i = 0;
+        while let Some((__start, __end)) = $world.masks.next(__mask, &mut __i, __n) {
+            let __init_mask = $world.masks.masks[__i].1;
+            for __i in __start..__end {
+                let $id = __i;
+                entity_unchecked_access!($world, $id, __mask, __mask_map, __init_mask,
+                    $(filter: |$filter_id| $filter ;)* |$($n : $x,)*| $e);
+            }
+            __i += 1;
         }
     };
 );
@@ -304,32 +517,20 @@ macro_rules! system_ids(
 /// This is the same for any signature, no matter which order arguments are preserved.
 #[macro_export]
 macro_rules! entity_ids(
-    ($world:ident, $iter:expr, $id:ident, |$($x:ty),*| $e:expr) => {
+    ($world:ident, $id:ident, |$($x:ty),*| $e:expr) => {
         let __mask: u64 = ($(1 << <Component as Ind<$x>>::ind())|*);
         let __component_len = __mask.count_ones() as isize;
-        let mut __mask_map: [isize; 64] = [0; 64];
-        let mut __i: isize = 0;
-        let mut __bit = 0;
-        while __i < __component_len {
-            let mut set = false;
-            $(
-                if <Component as Ind<$x>>::ind() == __bit {
-                    __mask_map[<Component as Ind<$x>>::ind() as usize] = __i;
-                    set = true;
-                }
-            )*
-            if set {__i += 1}
-            __bit += 1;
-        }
-        for __i in $iter {
-            if $world.has_mask(__i, __mask) {
+        assert_eq!(__component_len, tup_count!($($n),*), "Component used twice");
+
+        let __n = $world.entities.len();
+        let mut __i = 0;
+        while let Some((__start, __end)) = $world.masks.next(__mask, &mut __i, __n) {
+            for __i in __start..__end {
                 let $id = __i;
                 $e
             }
+            __i += 1;
         }
-    };
-    ($world:ident, $id:ident, |$($x:ty),*| $e:expr) => {
-        entity_ids!($world, 0..$world.entities.len(), $id, |$($x),*| $e)
     };
 );
 
@@ -342,23 +543,8 @@ macro_rules! entity_ids(
 #[macro_export]
 macro_rules! entity(
     ($world:ident, $ind:expr, |$($n:ident: $x:ty),*| $e:expr) => {
-        let __mask: u64 = ($(1 << <Component as Ind<$x>>::ind())|*);
-        let __component_len = __mask.count_ones() as isize;
-        assert_eq!(__component_len, tup_count!($($n),*), "Component used twice");
-        let mut __mask_map: [isize; 64] = [0; 64];
-        let mut __i: isize = 0;
-        let mut __bit = 0;
-        while __i < __component_len {
-            let mut set = false;
-            $(
-                if <Component as Ind<$x>>::ind() == __bit {
-                    __mask_map[<Component as Ind<$x>>::ind() as usize] = __i;
-                    set = true;
-                }
-            )*
-            if set {__i += 1}
-            __bit += 1;
-        }
+        mask_pre!(__mask, __mask_map, |$($n: $x),*|);
+
         let __i = $ind;
         entity_access!($world, __i, __mask, __mask_map, |$($n : $x,)*| $e);
     }
@@ -402,6 +588,44 @@ macro_rules! entity_access(
             )*
             $e
         }
+    }
+);
+
+/// Accesses an entity, but without checking active mask.
+///
+/// This macro is used internally.
+///
+/// Reuses mask map if the initial mask matches exactly.
+/// Otherwise, it loops through list of components in entity slice.
+#[macro_export]
+macro_rules! entity_unchecked_access(
+    ($world:ident, $i:ident, $__mask:ident, $__mask_map:ident,
+     $__entity_init_mask:ident,
+     $(filter: |$filter_id:ident| $filter:expr ;)*
+    |$($n:ident : $x:ty,)*| $e:expr) => {
+        $(
+            let $filter_id = $i;
+            if !$filter {continue};
+        )*
+        let __slice = $world.entity_slice($i).as_mut_ptr();
+        $(
+            let $n: $x = if $__entity_init_mask == $__mask {
+                unsafe {
+                    __slice.offset($__mask_map[<Component as Ind<$x>>::ind() as usize])
+                    .get()
+                }.unwrap()
+            } else {
+                let mut ptr = __slice;
+                loop {
+                    if let Some(val) = unsafe {<*mut Component as Get<$x>>::get(ptr)} {
+                        break val;
+                    } else {
+                        unsafe {ptr = ptr.add(1)};
+                    }
+                }
+            };
+        )*
+        $e
     }
 );
 
@@ -465,8 +689,8 @@ macro_rules! push{
             fn push(&mut self, ($($n),*): ($($x),*)) -> usize {
                 let id = self.entities.len();
                 let comp = self.components.len();
-                let mask = $(1 << <Component as Ind<$x>>::ind())|+;
-                self.masks.push((mask, mask));
+                let mask: u64 = $(1 << <Component as Ind<$x>>::ind())|+;
+                self.masks.push(mask, id);
                 let count = tup_count!($($n),*);
                 assert_eq!(mask.count_ones(), count, "Component declared twice");
                 let mut i = 0;
