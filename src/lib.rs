@@ -213,7 +213,7 @@ impl MaskStorage {
 /// Example: `ecs!{4; Position, Velocity}`
 #[macro_export]
 macro_rules! ecs{
-    ($max_components:tt : $($x:ident),*) => {
+    ($max_components:tt : $($x:ident),* $(,)?) => {
         /// Stores a single component.
         #[allow(missing_docs)]
         pub enum Component {
@@ -448,13 +448,13 @@ macro_rules! ecs{
 #[macro_export]
 macro_rules! tup_count(
     () => {0};
-    ($x0:ident $(, $y:ident)*) => {1 + tup_count!($($y),*)};
+    ($x0:ident $(, $y:ident)* $(,)?) => {1 + tup_count!($($y),*)};
 );
 
 /// Generates mask pattern based on a set of components.
 #[macro_export]
 macro_rules! mask_pat(
-    ($($x:ident),*) => {($(1 << <Component as Ind<$x>>::ind())|*)}
+    ($($x:ident),* $(,)?) => {($(1 << <Component as Ind<$x>>::ind())|*)}
 );
 
 /// Used internally by other macros.
@@ -480,7 +480,8 @@ macro_rules! mask_pre(
 /// *Warning! This is unsafe to call nested when accessing same entities more than one.*
 #[macro_export]
 macro_rules! system(
-    ($world:ident, $(filter: |$filter_id:ident| $filter:expr ;)* |$($n:ident: $x:ty),*| $e:expr) => {
+    ($world:ident, $(filter: |$filter_id:ident| $filter:expr ;)*
+    |$($n:ident: $x:ty),* $(,)?| $e:expr) => {
         mask_pre!(__mask, |$($n: $x),*|);
 
         let __n = $world.entities.len();
@@ -507,7 +508,7 @@ macro_rules! system_ids(
     ($world:ident,
      $(filter: |$filter_id:ident| $filter:expr ;)*
      $id:ident,
-     |$($n:ident: $x:ty),*| $e:expr) => {
+     |$($n:ident: $x:ty),* $(,)?| $e:expr) => {
         mask_pre!(__mask, |$($n: $x),*|);
 
         let __n = $world.entities.len();
@@ -530,7 +531,7 @@ macro_rules! system_ids(
 /// Enumerates indices of entities only.
 #[macro_export]
 macro_rules! entity_ids(
-    ($world:ident, $id:ident, |$($x:ty),*| $e:expr) => {
+    ($world:ident, $id:ident, |$($x:ty),* $(,)?| $e:expr) => {
         mask_pre!(__mask, |$($n: $x),*|);
 
         let __n = $world.entities.len();
@@ -550,7 +551,7 @@ macro_rules! entity_ids(
 /// *Warning! This is unsafe to call nested when accessing same entities more than one.*
 #[macro_export]
 macro_rules! entity(
-    ($world:ident, $ind:expr, |$($n:ident: $x:ty),*| $e:expr) => {
+    ($world:ident, $ind:expr, |$($n:ident: $x:ty),* $(,)?| $e:expr) => {
         mask_pre!(__mask, |$($n: $x),*|);
 
         let __i = $ind;
