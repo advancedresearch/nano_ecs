@@ -396,6 +396,28 @@ macro_rules! ecs{
             }
         }
 
+        /// The index of a component type `T` from `Component`.
+        ///
+        /// This is used to store the components in the declared order.
+        pub trait Ind<T> {
+            /// Returns the component index.
+            fn ind() -> u8;
+        }
+        /// Gets a component type `T` from a raw pointer of `Component`.
+        ///
+        /// Implemented for `&mut T` and `&T`.
+        pub trait Get<T> {
+            /// Gets component type.
+            ///
+            /// This is an unsafe method because the lifetime of the return value is only valid for the scope.
+            unsafe fn get(self) -> Option<T>;
+        }
+        /// Creates a new entity from a set of components.
+        pub trait Push<T> {
+            /// Pushes/spawns a new entity.
+            fn push(&mut self, val: T) -> usize;
+        }
+
         push_impl!{$max_components}
 
         ind!{Component, 0, $($x),*}
@@ -681,26 +703,4 @@ macro_rules! ind{
         impl Ind<$x> for $c {#[inline(always)] fn ind() -> u8 {$id}}
         ind!{$c, $id + 1, $($y),+}
     };
-}
-
-/// The index of a component type `T` from `Component`.
-///
-/// This is used to store the components in the declared order.
-pub trait Ind<T> {
-    /// Returns the component index.
-    fn ind() -> u8;
-}
-/// Gets a component type `T` from a raw pointer of `Component`.
-///
-/// Implemented for `&mut T` and `&T`.
-pub trait Get<T> {
-    /// Gets component type.
-    ///
-    /// This is an unsafe method because the lifetime of the return value is only valid for the scope.
-    unsafe fn get(self) -> Option<T>;
-}
-/// Creates a new entity from a set of components.
-pub trait Push<T> {
-    /// Pushes/spawns a new entity.
-    fn push(&mut self, val: T) -> usize;
 }
