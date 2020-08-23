@@ -161,6 +161,7 @@ impl MaskStorage {
 
         let only_in_old_range = at_beginning_in_old_range && at_end_in_old_range;
         let mut remove_old_range = false;
+        let mut remove_next_range = false;
         let mut res = Ok(());
         match (prev_range_same_masks, next_range_same_masks, only_in_old_range) {
             (true, false, _) => {
@@ -175,7 +176,8 @@ impl MaskStorage {
             }
             (true, true, true) => {
                 // Join previous and next range.
-                remove_old_range = only_in_old_range;
+                remove_old_range = true;
+                remove_next_range = true;
             }
             (false, false, true) => {
                 // Change mask on old range.
@@ -189,6 +191,10 @@ impl MaskStorage {
                 self.offsets.insert(ind + 1, id);
                 self.masks.insert(ind + 1, (mask, init_mask));
             }
+        }
+        if remove_next_range {
+            self.offsets.remove(ind + 1);
+            self.masks.remove(ind + 1);
         }
         if remove_old_range {
             self.offsets.remove(ind);
