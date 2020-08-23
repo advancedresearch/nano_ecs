@@ -431,28 +431,13 @@ macro_rules! mask_pat(
 
 /// Used internally by other macros.
 ///
-/// Builds a mask map from the argument signature.
+/// Checks that same component is not used twice.
 #[macro_export]
 macro_rules! mask_pre(
-    ($mask:ident, $mask_map:ident, |$($n:ident: $x:ty),*|) => {
+    ($mask:ident, |$($n:ident: $x:ty),*|) => {
         let $mask: u64 = ($(1 << <Component as Ind<$x>>::ind())|*);
         let __component_len = $mask.count_ones() as isize;
         assert_eq!(__component_len, tup_count!($($n),*), "Component used twice");
-
-        let mut $mask_map: [isize; 64] = [0; 64];
-        let mut __i: isize = 0;
-        let mut __bit = 0;
-        while __i < __component_len {
-            let mut set = false;
-            $(
-                if <Component as Ind<$x>>::ind() == __bit {
-                    $mask_map[<Component as Ind<$x>>::ind() as usize] = __i;
-                    set = true;
-                }
-            )*
-            if set {__i += 1}
-            __bit += 1;
-        }
     }
 );
 
@@ -464,22 +449,22 @@ macro_rules! mask_pre(
 ///
 /// `system!(world, filter: |n| world.has_component::<Velocity>(); |pos: &mut Position| {...})`
 ///
-/// Pre-processes a mask map from component index to entity slice.
-/// This is the same for any signature, no matter which order arguments are preserved.
-///
 /// *Warning! This is unsafe to call nested when accessing same entities more than one.*
 #[macro_export]
 macro_rules! system(
     ($world:ident, $(filter: |$filter_id:ident| $filter:expr ;)* |$($n:ident: $x:ty),*| $e:expr) => {
-        mask_pre!(__mask, __mask_map, |$($n: $x),*|);
+        mask_pre!(__mask, |$($n: $x),*|);
 
         let __n = $world.entities.len();
         let mut __i = 0;
         while let Some((__start, __end)) = $world.masks.next(__mask, &mut __i, __n) {
             let __init_mask = $world.masks.masks[__i].1;
+            let __components = __init_mask.count_ones() as usize;
+            let mut __ptr = $world.entity_slice(__start).as_mut_ptr();
             for __i in __start..__end {
-                entity_unchecked_access!($world, __i, __mask, __mask_map, __init_mask,
+                entity_unchecked_access!($world, __i, __init_mask, __ptr,
                     $(filter: |$filter_id| $filter ;)* |$($n : $x,)*| $e);
+                __ptr = unsafe {__ptr.add(__components)};
             }
             __i += 1;
         }
@@ -495,16 +480,19 @@ macro_rules! system_ids(
      $(filter: |$filter_id:ident| $filter:expr ;)*
      $id:ident,
      |$($n:ident: $x:ty),*| $e:expr) => {
-        mask_pre!(__mask, __mask_map, |$($n: $x),*|);
+        mask_pre!(__mask, |$($n: $x),*|);
 
         let __n = $world.entities.len();
         let mut __i = 0;
         while let Some((__start, __end)) = $world.masks.next(__mask, &mut __i, __n) {
             let __init_mask = $world.masks.masks[__i].1;
+            let __components = __init_mask.count_ones() as usize;
+            let mut __ptr = $world.entity_slice(__start).as_mut_ptr();
             for __i in __start..__end {
                 let $id = __i;
-                entity_unchecked_access!($world, $id, __mask, __mask_map, __init_mask,
+                entity_unchecked_access!($world, $id, __init_mask, __ptr,
                     $(filter: |$filter_id| $filter ;)* |$($n : $x,)*| $e);
+                __ptr = unsafe {__ptr.add(__components)};
             }
             __i += 1;
         }
@@ -512,15 +500,10 @@ macro_rules! system_ids(
 );
 
 /// Enumerates indices of entities only.
-///
-/// Pre-processes a mask map from component index to entity slice.
-/// This is the same for any signature, no matter which order arguments are preserved.
 #[macro_export]
 macro_rules! entity_ids(
     ($world:ident, $id:ident, |$($x:ty),*| $e:expr) => {
-        let __mask: u64 = ($(1 << <Component as Ind<$x>>::ind())|*);
-        let __component_len = __mask.count_ones() as isize;
-        assert_eq!(__component_len, tup_count!($($n),*), "Component used twice");
+        mask_pre!(__mask, |$($n: $x),*|);
 
         let __n = $world.entities.len();
         let mut __i = 0;
@@ -536,55 +519,37 @@ macro_rules! entity_ids(
 
 /// Accesses a single entity.
 ///
-/// Pre-processes a mask map from component index to entity slice.
-/// This is the same for any signature, no matter which order arguments are preserved.
-///
 /// *Warning! This is unsafe to call nested when accessing same entities more than one.*
 #[macro_export]
 macro_rules! entity(
     ($world:ident, $ind:expr, |$($n:ident: $x:ty),*| $e:expr) => {
-        mask_pre!(__mask, __mask_map, |$($n: $x),*|);
+        mask_pre!(__mask, |$($n: $x),*|);
 
         let __i = $ind;
-        entity_access!($world, __i, __mask, __mask_map, |$($n : $x,)*| $e);
+        entity_access!($world, __i, __mask, |$($n : $x,)*| $e);
     }
 );
 
 /// Accesses an entity.
 ///
 /// This macro is used internally.
-///
-/// Reuses mask map if the initial mask matches exactly.
-/// Otherwise, it loops through list of components in entity slice.
 #[macro_export]
 macro_rules! entity_access(
-    ($world:ident, $i:ident, $__mask:ident, $__mask_map:ident,
+    ($world:ident, $i:ident, $__mask:ident,
      $(filter: |$filter_id:ident| $filter:expr ;)*
     |$($n:ident : $x:ty,)*| $e:expr) => {
-        let __entity_init_mask = $world.init_mask_of($i);
+        let __init_mask = $world.init_mask_of($i);
         let __entity_mask = $world.mask_of($i);
-        if __entity_init_mask & __entity_mask & $__mask == $__mask {
+        if __init_mask & __entity_mask & $__mask == $__mask {
             $(
                 let $filter_id = $i;
                 if !$filter {continue};
             )*
-            let __slice = $world.entity_slice($i).as_mut_ptr();
+            let __ptr = $world.entity_slice($i).as_mut_ptr();
             $(
-                let $n: $x = if __entity_init_mask == $__mask {
-                    unsafe {
-                        __slice.offset($__mask_map[<Component as Ind<$x>>::ind() as usize])
-                        .get()
-                    }.unwrap()
-                } else {
-                    let mut ptr = __slice;
-                    loop {
-                        if let Some(val) = unsafe {<*mut Component as Get<$x>>::get(ptr)} {
-                            break val;
-                        } else {
-                            unsafe {ptr = ptr.add(1)};
-                        }
-                    }
-                };
+            let $n: $x = unsafe {__ptr.offset(
+                (((1_u64 << <Component as Ind<$x>>::ind()) - 1) & __init_mask).count_ones() as isize
+            ).get()}.unwrap();
             )*
             $e
         }
@@ -594,36 +559,19 @@ macro_rules! entity_access(
 /// Accesses an entity, but without checking active mask.
 ///
 /// This macro is used internally.
-///
-/// Reuses mask map if the initial mask matches exactly.
-/// Otherwise, it loops through list of components in entity slice.
 #[macro_export]
 macro_rules! entity_unchecked_access(
-    ($world:ident, $i:ident, $__mask:ident, $__mask_map:ident,
-     $__entity_init_mask:ident,
+    ($world:ident, $i:ident, $__init_mask:ident, $__ptr:ident,
      $(filter: |$filter_id:ident| $filter:expr ;)*
     |$($n:ident : $x:ty,)*| $e:expr) => {
         $(
             let $filter_id = $i;
             if !$filter {continue};
         )*
-        let __slice = $world.entity_slice($i).as_mut_ptr();
         $(
-            let $n: $x = if $__entity_init_mask == $__mask {
-                unsafe {
-                    __slice.offset($__mask_map[<Component as Ind<$x>>::ind() as usize])
-                    .get()
-                }.unwrap()
-            } else {
-                let mut ptr = __slice;
-                loop {
-                    if let Some(val) = unsafe {<*mut Component as Get<$x>>::get(ptr)} {
-                        break val;
-                    } else {
-                        unsafe {ptr = ptr.add(1)};
-                    }
-                }
-            };
+        let $n: $x = unsafe {$__ptr.offset(
+            (((1_u64 << <Component as Ind<$x>>::ind()) - 1) & $__init_mask).count_ones() as isize
+        ).get()}.unwrap();
         )*
         $e
     }
