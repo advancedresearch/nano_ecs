@@ -532,7 +532,7 @@ macro_rules! system_ids(
 #[macro_export]
 macro_rules! entity_ids(
     ($world:ident, $id:ident, |$($x:ty),* $(,)?| $e:expr) => {
-        mask_pre!(__mask, |$($n: $x),*|);
+        mask_pre!(__mask, |$(_n: $x),*|);
 
         let __n = $world.entities.len();
         let mut __i = 0;
