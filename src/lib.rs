@@ -475,12 +475,12 @@ macro_rules! mask_pre(
 ///
 /// One or more filters can be added using the `world` object:
 ///
-/// `system!(world, filter: |n| world.has_component::<Velocity>(); |pos: &mut Position| {...})`
+/// `system!(world, ?|n| world.has_component::<Velocity>(); |pos: &mut Position| {...})`
 ///
 /// *Warning! This is unsafe to call nested when accessing same entities more than one.*
 #[macro_export]
 macro_rules! system(
-    ($world:ident, $(filter: |$filter_id:ident| $filter:expr ;)*
+    ($world:ident, $(?|$filter_id:ident| $filter:expr ;)*
     |$($n:ident: $x:ty),* $(,)?| $e:expr) => {
         mask_pre!(__mask, |$($n: $x),*|);
 
@@ -492,7 +492,7 @@ macro_rules! system(
             let mut __ptr = $world.entity_slice(__start).as_mut_ptr();
             for __i in __start..__end {
                 entity_unchecked_access!($world, __i, __init_mask, __ptr,
-                    $(filter: |$filter_id| $filter ;)* |$($n : $x,)*| $e);
+                    $(?|$filter_id| $filter ;)* |$($n : $x,)*| $e);
                 __ptr = unsafe {__ptr.add(__components)};
             }
             __i += 1;
@@ -502,11 +502,11 @@ macro_rules! system(
 
 /// Same as `system!`, but with entity ids.
 ///
-/// Example: `system_ids!(world, filter: |n| ...; id, |&Position| {...});`
+/// Example: `system_ids!(world, ?|n| ...; id, |&Position| {...});`
 #[macro_export]
 macro_rules! system_ids(
     ($world:ident,
-     $(filter: |$filter_id:ident| $filter:expr ;)*
+     $(?|$filter_id:ident| $filter:expr ;)*
      $id:ident,
      |$($n:ident: $x:ty),* $(,)?| $e:expr) => {
         mask_pre!(__mask, |$($n: $x),*|);
@@ -520,7 +520,7 @@ macro_rules! system_ids(
             for __i in __start..__end {
                 let $id = __i;
                 entity_unchecked_access!($world, $id, __init_mask, __ptr,
-                    $(filter: |$filter_id| $filter ;)* |$($n : $x,)*| $e);
+                    $(?|$filter_id| $filter ;)* |$($n : $x,)*| $e);
                 __ptr = unsafe {__ptr.add(__components)};
             }
             __i += 1;
@@ -565,7 +565,7 @@ macro_rules! entity(
 #[macro_export]
 macro_rules! entity_access(
     ($world:ident, $i:ident, $__mask:ident,
-     $(filter: |$filter_id:ident| $filter:expr ;)*
+     $(?|$filter_id:ident| $filter:expr ;)*
     |$($n:ident : $x:ty,)*| $e:expr) => {
         let __init_mask = $world.init_mask_of($i);
         let __entity_mask = $world.mask_of($i);
@@ -591,7 +591,7 @@ macro_rules! entity_access(
 #[macro_export]
 macro_rules! entity_unchecked_access(
     ($world:ident, $i:ident, $__init_mask:ident, $__ptr:ident,
-     $(filter: |$filter_id:ident| $filter:expr ;)*
+     $(?|$filter_id:ident| $filter:expr ;)*
     |$($n:ident : $x:ty,)*| $e:expr) => {
         $(
             let $filter_id = $i;

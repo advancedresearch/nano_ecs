@@ -1,6 +1,6 @@
 [package]
 name = "advancedresearch-nano_ecs"
-version = "0.5.2"
+version = "0.6.0"
 authors = ["Sven Nilsen <bvssvni@gmail.com>"]
 edition = "2018"
 keywords = ["ecs", "macro", "tiny", "nano", "advancedresearch"]
