@@ -321,6 +321,20 @@ macro_rules! ecs{
                 self.masks.mask_of(id) & mask == mask
             }
 
+            /// Returns `true` if any entity has a component.
+            #[inline(always)]
+            pub fn has_any_component<T>(&self) -> bool
+                where Component: Ind<T>
+            {
+                self.has_any_component_index(self.component_index::<T>())
+            }
+
+            /// Returns `true` if any entity has a component by index.
+            #[inline]
+            pub fn has_any_component_index(&self, ind: u8) -> bool {
+                self.masks.masks.iter().any(|&(m, _)| (m >> ind) & 1 == 1)
+            }
+
             /// Returns the component index of a component.
             #[inline(always)]
             pub fn component_index<T>(&self) -> u8
