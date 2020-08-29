@@ -155,10 +155,11 @@ impl MaskStorage {
         let prev_range_same_masks = prev_offset.is_some() &&
             self.masks[ind - 1] == (mask, init_mask);
 
-        let last = next_offset.is_none();
+        let last_range = next_offset.is_none();
         let next_offset = next_offset.map(|x| *x).unwrap_or(n);
         let at_beginning_in_old_range = offset == id;
         let at_end_in_old_range = next_offset == id + 1;
+        let last = last_range && at_end_in_old_range;
 
         let only_in_old_range = at_beginning_in_old_range && at_end_in_old_range;
         let mut remove_old_range = false;
