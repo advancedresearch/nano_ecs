@@ -155,6 +155,7 @@ impl MaskStorage {
         let prev_range_same_masks = prev_offset.is_some() &&
             self.masks[ind - 1] == (mask, init_mask);
 
+        let last = next_offset.is_none();
         let next_offset = next_offset.map(|x| *x).unwrap_or(n);
         let at_beginning_in_old_range = offset == id;
         let at_end_in_old_range = next_offset == id + 1;
@@ -185,11 +186,16 @@ impl MaskStorage {
             }
             (false, false, false) => {
                 // Insert range.
-                self.offsets.insert(ind + 1, id + 1);
-                let old_masks = self.masks[ind];
-                self.masks.insert(ind + 1, old_masks);
-                self.offsets.insert(ind + 1, id);
-                self.masks.insert(ind + 1, (mask, init_mask));
+                if last {
+                    self.offsets.push(id);
+                    self.masks.push((mask, init_mask));
+                } else {
+                    self.offsets.insert(ind + 1, id + 1);
+                    let old_masks = self.masks[ind];
+                    self.masks.insert(ind + 1, old_masks);
+                    self.offsets.insert(ind + 1, id);
+                    self.masks.insert(ind + 1, (mask, init_mask));
+                }
             }
         }
         if remove_next_range {
@@ -377,9 +383,17 @@ macro_rules! ecs{
             pub fn enable_component<T>(&mut self, id: usize) -> bool
                 where Component: Ind<T>
             {
+                self.enable_component_index(id, <Component as Ind<T>>::ind())
+            }
+
+            /// Enables component for entity by index.
+            ///
+            /// The entity must be pushed with the component active to enable it again.
+            /// Returns `true` if successful.
+            pub fn enable_component_index(&mut self, id: usize, ind: u8) -> bool {
                 let (mut mask, init_mask) = self.masks.both_masks_of(id);
-                if init_mask >> <Component as Ind<T>>::ind() & 1 == 1 {
-                    mask |= 1 << <Component as Ind<T>>::ind();
+                if init_mask >> ind & 1 == 1 {
+                    mask |= 1 << ind;
                     if let Err(j) = self.masks.update(mask, id, self.entities.len()) {
                         if j != id {unsafe {self.unchecked_swap_components(id, j)}}
                     }
@@ -394,8 +408,14 @@ macro_rules! ecs{
             pub fn disable_component<T>(&mut self, id: usize)
                 where Component: Ind<T>
             {
+                self.disable_component_index(id, <Component as Ind<T>>::ind())
+            }
+
+            /// Disables component for entity by index.
+            #[inline(always)]
+            pub fn disable_component_index(&mut self, id: usize, ind: u8) {
                 let mut mask = self.masks.mask_of(id);
-                mask &= !(1 << <Component as Ind<T>>::ind());
+                mask &= !(1 << ind);
                 if let Err(j) = self.masks.update(mask, id, self.entities.len()) {
                     if j != id {unsafe {self.unchecked_swap_components(id, j)}}
                 }
