@@ -170,11 +170,13 @@ impl MaskStorage {
                 // Join previous range.
                 remove_old_range = only_in_old_range;
                 if !at_beginning_in_old_range {res = Err(offset)};
+                self.offsets[ind] += 1;
             }
             (false, true, _) | (_, true, false) => {
                 // Join next range.
                 remove_old_range = only_in_old_range;
                 if !at_end_in_old_range {res = Err(next_offset - 1)}
+                self.offsets[ind + 1] -= 1;
             }
             (true, true, true) => {
                 // Join previous and next range.
